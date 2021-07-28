@@ -22,9 +22,9 @@ class Kitti3DBox(_BaseDataset):
         code_path = utils.get_code_path()
         default_config = {
             # Location of GT data
-            'GT_FOLDER': os.path.join(code_path, 'data/gt/kitti/kitti_2d_box_train'),
+            'GT_FOLDER': os.path.join(code_path, 'data/gt/kitti/kitti_3d_box_train'),
             # Trackers location
-            'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/kitti/kitti_2d_box_train/'),
+            'TRACKERS_FOLDER': os.path.join(code_path, 'data/trackers/kitti/kitti_3d_box_train/'),
             # Where to save eval results (if None, same as TRACKERS_FOLDER)
             'OUTPUT_FOLDER': None,
             # Filenames of trackers to eval (if None, all in folder)
@@ -194,9 +194,9 @@ class Kitti3DBox(_BaseDataset):
                                                              is_zipped=self.data_is_zipped, zip_file=zip_file)
         # Convert data to required format
         num_timesteps = self.seq_lengths[seq]
-        data_keys = ['ids', 'classes', 'dets']
+        data_keys = ['ids', 'classes', 'dets', 'dets_2d']
         if is_gt:
-            data_keys += ['gt_crowd_ignore_regions', 'gt_extras']
+            data_keys += ['gt_crowd_ignore_regions', 'gt_crowd_ignore_regions_2d', 'gt_extras']
         else:
             data_keys += ['tracker_confidences']
         raw_data = {key: [None] * num_timesteps for key in data_keys}
@@ -204,7 +204,8 @@ class Kitti3DBox(_BaseDataset):
             time_key = str(t)
             if time_key in read_data.keys():
                 time_data = np.asarray(read_data[time_key], dtype=np.float)
-                raw_data['dets'][t] = np.atleast_2d(time_data[:, 6:17])
+                raw_data['dets_2d'][t] = np.atleast_2d(time_data[:, 6:10])
+                raw_data['dets'][t] = np.atleast_2d(time_data[:, 10:17])
                 raw_data['ids'][t] = np.atleast_1d(time_data[:, 1]).astype(int)
                 raw_data['classes'][t] = np.atleast_1d(
                     time_data[:, 2]).astype(int)
@@ -220,7 +221,8 @@ class Kitti3DBox(_BaseDataset):
                         raw_data['tracker_confidences'][t] = np.ones(
                             time_data.shape[0])
             else:
-                raw_data['dets'][t] = np.empty((0, 4))
+                raw_data['dets_2d'][t] = np.empty((0, 4))
+                raw_data['dets'][t] = np.empty((0, 7))
                 raw_data['ids'][t] = np.empty(0).astype(int)
                 raw_data['classes'][t] = np.empty(0).astype(int)
                 if is_gt:
@@ -233,19 +235,24 @@ class Kitti3DBox(_BaseDataset):
                 if time_key in ignore_data.keys():
                     time_ignore = np.asarray(
                         ignore_data[time_key], dtype=np.float)
+                    raw_data['gt_crowd_ignore_regions_2d'][t] = np.atleast_2d(
+                        time_ignore[:, 6:10])
                     raw_data['gt_crowd_ignore_regions'][t] = np.atleast_2d(
-                        time_ignore[:, 6:17])
+                        time_ignore[:, 10:17])
                 else:
-                    raw_data['gt_crowd_ignore_regions'][t] = np.empty((0, 4))
+                    raw_data['gt_crowd_ignore_regions_2d'][t] = np.empty((0, 4))
+                    raw_data['gt_crowd_ignore_regions'][t] = np.empty((0, 7))
 
         if is_gt:
             key_map = {'ids': 'gt_ids',
                        'classes': 'gt_classes',
-                       'dets': 'gt_dets'}
+                       'dets': 'gt_dets',
+                       'dets_2d' : 'gt_dets_2d'}
         else:
             key_map = {'ids': 'tracker_ids',
                        'classes': 'tracker_classes',
-                       'dets': 'tracker_dets'}
+                       'dets': 'tracker_dets',
+                       'dets_2d' : 'tracker_dets_2d'}
         for k, v in key_map.items():
             raw_data[v] = raw_data.pop(k)
         raw_data['num_timesteps'] = num_timesteps
@@ -253,7 +260,7 @@ class Kitti3DBox(_BaseDataset):
         return raw_data
 
     @_timing.time
-    def get_preprocessed_seq_data(self, raw_data, cls):
+    def get_preprocessed_seq_data(self, raw_data, cls, conf_thresh=0.0):
         """ Preprocess data for a single sequence for a single class ready for evaluation.
         Inputs:
              - raw_data is a dict containing the data for the sequence already read in by get_raw_seq_data().
@@ -297,7 +304,8 @@ class Kitti3DBox(_BaseDataset):
         cls_id = self.class_name_to_class_id[cls]
 
         data_keys = ['gt_ids', 'tracker_ids', 'gt_dets',
-                     'tracker_dets', 'tracker_confidences', 'similarity_scores']
+                     'tracker_dets', 'tracker_dets_2d', 'tracker_confidences',
+                     'similarity_scores', 'similarity_scores_2d']
         data = {key: [None] * raw_data['num_timesteps'] for key in data_keys}
         unique_gt_ids = []
         unique_tracker_ids = []
@@ -320,22 +328,26 @@ class Kitti3DBox(_BaseDataset):
             tracker_class_mask = tracker_class_mask.astype(np.bool)
             tracker_ids = raw_data['tracker_ids'][t][tracker_class_mask]
             tracker_dets = raw_data['tracker_dets'][t][tracker_class_mask]
+            tracker_dets_2d = raw_data['tracker_dets_2d'][t][tracker_class_mask]
             tracker_confidences = raw_data['tracker_confidences'][t][tracker_class_mask]
-            similarity_scores, similarity_scores_2d = raw_data['similarity_scores'][t]
+            similarity_scores = raw_data['similarity_scores'][t]
+            similarity_scores_2d  = raw_data['similarity_scores_2d'][t]
             similarity_scores = similarity_scores[gt_class_mask, :][:, tracker_class_mask]
             similarity_scores_2d = similarity_scores_2d[gt_class_mask, :][:, tracker_class_mask]
 
-            # to_delete_by_confidence = tracker_confidences < 0.7
-            # tracker_ids = np.delete(
-            #     tracker_ids, to_delete_by_confidence, axis=0)
-            # tracker_dets = np.delete(
-            #     tracker_dets, to_delete_by_confidence, axis=0)
-            # tracker_confidences = np.delete(
-            #     tracker_confidences, to_delete_by_confidence, axis=0)
-            # similarity_scores = np.delete(
-            #     similarity_scores, to_delete_by_confidence, axis=1)
-            # similarity_scores_2d = np.delete(
-            #     similarity_scores_2d, to_delete_by_confidence, axis=1)
+            to_delete_by_confidence = tracker_confidences < conf_thresh
+            tracker_ids = np.delete(
+                tracker_ids, to_delete_by_confidence, axis=0)
+            tracker_dets = np.delete(
+                tracker_dets, to_delete_by_confidence, axis=0)
+            tracker_dets_2d = np.delete(
+                tracker_dets_2d, to_delete_by_confidence, axis=0)
+            tracker_confidences = np.delete(
+                tracker_confidences, to_delete_by_confidence, axis=0)
+            similarity_scores = np.delete(
+                similarity_scores, to_delete_by_confidence, axis=1)
+            similarity_scores_2d = np.delete(
+                similarity_scores_2d, to_delete_by_confidence, axis=1)
 
             # Match tracker and gt dets (with hungarian algorithm) and remove tracker dets which match with gt dets
             # which are labeled as truncated, occluded, or belonging to a distractor class.
@@ -343,7 +355,7 @@ class Kitti3DBox(_BaseDataset):
             unmatched_indices = np.arange(tracker_ids.shape[0])
             if gt_ids.shape[0] > 0 and tracker_ids.shape[0] > 0:
                 matching_scores = similarity_scores_2d.copy()
-                matching_scores[matching_scores < 0.25] = 0
+                matching_scores[matching_scores < 0.5] = 0
                 match_rows, match_cols = linear_sum_assignment(
                     -matching_scores)
                 actually_matched_mask = matching_scores[match_rows,
@@ -364,14 +376,14 @@ class Kitti3DBox(_BaseDataset):
                     unmatched_indices, match_cols, axis=0)
 
             # For unmatched tracker dets, also remove those smaller than a minimum height.
-            unmatched_tracker_dets = tracker_dets[unmatched_indices, :]
+            unmatched_tracker_dets = tracker_dets_2d[unmatched_indices, :]
             unmatched_heights = unmatched_tracker_dets[:,
                                                        3] - unmatched_tracker_dets[:, 1]
             is_too_small = unmatched_heights <= self.min_height
 
             # For unmatched tracker dets, also remove those that are greater than 50% within a crowd ignore region.
-            crowd_ignore_regions = raw_data['gt_crowd_ignore_regions'][t]
-            intersection_with_ignore_region = self._calculate_box_ious(unmatched_tracker_dets[:, :4], crowd_ignore_regions[:, :4],
+            crowd_ignore_regions = raw_data['gt_crowd_ignore_regions_2d'][t]
+            intersection_with_ignore_region = self._calculate_box_ious(unmatched_tracker_dets, crowd_ignore_regions,
                                                                        box_format='x0y0x1y1', do_ioa=True)
             is_within_crowd_ignore_region = np.any(
                 intersection_with_ignore_region > 0.5, axis=1)
@@ -385,10 +397,14 @@ class Kitti3DBox(_BaseDataset):
                 tracker_ids, to_remove_tracker, axis=0)
             data['tracker_dets'][t] = np.delete(
                 tracker_dets, to_remove_tracker, axis=0)
+            data['tracker_dets_2d'][t] = np.delete(
+                tracker_dets_2d, to_remove_tracker, axis=0)
             data['tracker_confidences'][t] = np.delete(
                 tracker_confidences, to_remove_tracker, axis=0)
             similarity_scores = np.delete(
                 similarity_scores, to_remove_tracker, axis=1)
+            similarity_scores_2d = np.delete(
+                similarity_scores_2d, to_remove_tracker, axis=1)
 
             # Also remove gt dets that were only useful for preprocessing and are not needed for evaluation.
             # These are those that are occluded, truncated and from distractor objects.
@@ -398,6 +414,7 @@ class Kitti3DBox(_BaseDataset):
             data['gt_ids'][t] = gt_ids[gt_to_keep_mask]
             data['gt_dets'][t] = gt_dets[gt_to_keep_mask, :]
             data['similarity_scores'][t] = similarity_scores[gt_to_keep_mask]
+            data['similarity_scores_2d'][t] = similarity_scores_2d[gt_to_keep_mask]
 
             unique_gt_ids += list(np.unique(data['gt_ids'][t]))
             unique_tracker_ids += list(np.unique(data['tracker_ids'][t]))
@@ -436,14 +453,14 @@ class Kitti3DBox(_BaseDataset):
 
         return data
 
-    def _calculate_similarities(self, gt_dets_t, tracker_dets_t):
+    def _calculate_similarities(self, gt_dets_t, tracker_dets_t, gt_dets_2d_t, trackers_dets_2d_t):
         # print(gt_dets_t, tracker_dets_t)
         similarity_scores = self.__box_3d_GIoU(
             gt_dets_t, tracker_dets_t, box_format='xyzhwlr')
         # print(similarity_scores)
         similarity_scores_2d = self._calculate_box_ious(
-            gt_dets_t[:, 0:4], tracker_dets_t[:, 0:4], box_format='x0y0x1y1')
-
+            gt_dets_2d_t, trackers_dets_2d_t, box_format='x0y0x1y1')
+        #print(gt_dets_t[0, :], tracker_dets_t[0, :])
         return (similarity_scores, similarity_scores_2d)
 
     def __polygon_clip(self, subjectPolygon, clipPolygon):
@@ -552,12 +569,12 @@ class Kitti3DBox(_BaseDataset):
                 corners_3d: (8,3) array in in rect camera coord.
         '''
         # compute rotational matrix around yaw axis
-        R = self.__roty(obj[10])
+        R = self.__roty(obj[6])
 
         # 3d bounding box dimensions
-        l = obj[6]
-        w = obj[5]
-        h = obj[4]
+        l = obj[2]
+        w = obj[1]
+        h = obj[0]
 
         # 3d bounding box corners
         x_corners = [l/2, l/2, -l/2, -l/2, l/2, l/2, -l/2, -l/2]
@@ -567,9 +584,9 @@ class Kitti3DBox(_BaseDataset):
         # rotate and translate 3d bounding box
         corners_3d = np.dot(R, np.vstack([x_corners, y_corners, z_corners]))
         # print corners_3d.shape
-        corners_3d[0, :] = corners_3d[0, :] + obj[7]
-        corners_3d[1, :] = corners_3d[1, :] + obj[8]
-        corners_3d[2, :] = corners_3d[2, :] + obj[9]
+        corners_3d[0, :] = corners_3d[0, :] + obj[3]
+        corners_3d[1, :] = corners_3d[1, :] + obj[4]
+        corners_3d[2, :] = corners_3d[2, :] + obj[5]
         # print('cornsers_3d: ', corners_3d)
 
         return np.transpose(corners_3d)

@@ -6,6 +6,7 @@ from . import utils
 from .utils import TrackEvalException
 from . import _timing
 from .metrics import Count
+import numpy as np
 
 
 class Evaluator:
@@ -29,6 +30,7 @@ class Evaluator:
             'OUTPUT_EMPTY_CLASSES': True,  # If False, summary files are not output for classes with no detections
             'OUTPUT_DETAILED': True,
             'PLOT_CURVES': True,
+            'SEARCH_DET_CONFIDENCE' : False # If True, linearly searches for a confidence threshold that maximizes HOTA metric
         }
         return default_config
 
@@ -40,7 +42,7 @@ class Evaluator:
             _timing.DO_TIMING = True
 
     @_timing.time
-    def evaluate(self, dataset_list, metrics_list):
+    def evaluate(self, dataset_list, metrics_list, conf=0.0):
         """Evaluate a set of metrics on a set of datasets"""
         config = self.config
         metrics_list = metrics_list + [Count()]  # Count metrics are always run
@@ -68,16 +70,58 @@ class Evaluator:
                     print('\nEvaluating %s\n' % tracker)
                     time_start = time.time()
                     if config['USE_PARALLEL']:
+                        hota_per_conf = {}
+                        max_hota_per_conf = 0.0
+                        max_conf = 0.0
+                        if config['SEARCH_DET_CONFIDENCE']:
+                            for conf in range(30, 91):
+                                with Pool(config['NUM_PARALLEL_CORES']) as pool:
+                                    _eval_sequence = partial(eval_sequence, dataset=dataset, tracker=tracker,
+                                                            class_list=class_list, metrics_list=metrics_list,
+                                                            metric_names=metric_names, conf_thresh=conf)
+                                    results = pool.map(_eval_sequence, seq_list)
+                                    res_conf = dict(zip(seq_list, results))
+
+                                curr_res = {seq_key: seq_value['car']['HOTA'] for seq_key, seq_value in res_conf.items() if
+                                                seq_key is not 'COMBINED_SEQ'}
+                                metric = metrics_list[metric_names == 'HOTA']
+                                curr_hota_value = np.mean(metric.combine_sequences(curr_res)['HOTA']) # mean over all alpha values
+                                print("Confidence threshold = {}, HOTA = {}".format(conf, curr_hota_value))
+                                if max_hota_per_conf < curr_hota_value:
+                                    max_hota_per_conf = curr_hota_value
+                                    max_conf = conf
+                                hota_per_conf[conf] = curr_hota_value
+
                         with Pool(config['NUM_PARALLEL_CORES']) as pool:
                             _eval_sequence = partial(eval_sequence, dataset=dataset, tracker=tracker,
                                                      class_list=class_list, metrics_list=metrics_list,
-                                                     metric_names=metric_names)
+                                                     metric_names=metric_names, conf_thresh=max_conf)
                             results = pool.map(_eval_sequence, seq_list)
                             res = dict(zip(seq_list, results))
                     else:
+                        hota_per_conf = {}
+                        max_hota_per_conf = 0.0
+                        max_conf = 0.0
+                        if config['SEARCH_DET_CONFIDENCE']:
+                            for conf in range(30, 91):
+                                res_conf = {}
+                                for curr_seq in sorted(seq_list):
+                                    res_conf[curr_seq] = eval_sequence(curr_seq, dataset, tracker, class_list, metrics_list, metric_names, conf_thresh=conf)
+
+                                curr_res = {seq_key: seq_value['car']['HOTA'] for seq_key, seq_value in res_conf.items() if
+                                                seq_key is not 'COMBINED_SEQ'}
+                                metric = metrics_list[metric_names == 'HOTA']
+                                curr_hota_value = np.mean(metric.combine_sequences(curr_res)['HOTA']) # mean over all alpha values
+                                print("Confidence threshold = {}, HOTA = {}".format(conf, curr_hota_value))
+                                if max_hota_per_conf < curr_hota_value:
+                                    max_hota_per_conf = curr_hota_value
+                                    max_conf = conf
+                                hota_per_conf[conf] = curr_hota_value
+
                         res = {}
                         for curr_seq in sorted(seq_list):
-                            res[curr_seq] = eval_sequence(curr_seq, dataset, tracker, class_list, metrics_list, metric_names)
+                            res[curr_seq] = eval_sequence(curr_seq, dataset, tracker, class_list, metrics_list, metric_names, conf_thresh=max_conf)
+
 
                     # Combine results over all sequences and then over all classes
                     res['COMBINED_SEQ'] = {}
@@ -143,13 +187,14 @@ class Evaluator:
 
 
 @_timing.time
-def eval_sequence(seq, dataset, tracker, class_list, metrics_list, metric_names):
+def eval_sequence(seq, dataset, tracker, class_list, metrics_list, metric_names, conf_thresh=0.0):
     """Function for evaluating a single sequence"""
     raw_data = dataset.get_raw_seq_data(tracker, seq)
+
     seq_res = {}
     for cls in class_list:
         seq_res[cls] = {}
-        data = dataset.get_preprocessed_seq_data(raw_data, cls)
+        data = dataset.get_preprocessed_seq_data(raw_data, cls, conf_thresh=conf_thresh)
         for metric, met_name in zip(metrics_list, metric_names):
             seq_res[cls][met_name] = metric.eval_sequence(data)
     return seq_res

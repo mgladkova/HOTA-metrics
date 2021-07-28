@@ -37,7 +37,7 @@ class _BaseDataset(ABC):
         ...
 
     @abstractmethod
-    def _calculate_similarities(self, gt_dets_t, tracker_dets_t):
+    def _calculate_similarities(self, gt_dets_t, tracker_dets_t, gt_dets_2d_t=None, tracker_dets_2d_t=None):
         ...
 
     # Helper functions for all datasets:
@@ -91,10 +91,26 @@ class _BaseDataset(ABC):
 
         # Calculate similarities for each timestep.
         similarity_scores = []
-        for gt_dets_t, tracker_dets_t in zip(raw_data['gt_dets'], raw_data['tracker_dets']):
-            ious = self._calculate_similarities(gt_dets_t, tracker_dets_t)
-            similarity_scores.append(ious)
+        similarity_scores_2d = []
+        if 'gt_dets_2d' in raw_data:
+            for gt_dets_t, tracker_dets_t, gt_dets_2d_t, tracker_dets_2d_t in zip(raw_data['gt_dets'], raw_data['tracker_dets'], raw_data['gt_dets_2d'], raw_data['tracker_dets_2d']):
+                ious = self._calculate_similarities(gt_dets_t, tracker_dets_t, gt_dets_2d_t, tracker_dets_2d_t)
+                if type(ious) is tuple:
+                    similarity_scores.append(ious[0])
+                    similarity_scores_2d.append(ious[1])
+                else:
+                    similarity_scores.append(ious)
+        else:
+            for gt_dets_t, tracker_dets_t in zip(raw_data['gt_dets'], raw_data['tracker_dets']):
+                ious = self._calculate_similarities(gt_dets_t, tracker_dets_t)
+                if type(ious) is tuple:
+                    similarity_scores.append(ious[0])
+                    similarity_scores_2d.append(ious[1])
+                else:
+                    similarity_scores.append(ious)
         raw_data['similarity_scores'] = similarity_scores
+        if len(similarity_scores_2d) > 0:
+            raw_data['similarity_scores_2d'] = similarity_scores_2d
         return raw_data
 
     @staticmethod

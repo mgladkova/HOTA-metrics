@@ -221,7 +221,7 @@ class Kitti2DBox(_BaseDataset):
         return raw_data
 
     @_timing.time
-    def get_preprocessed_seq_data(self, raw_data, cls):
+    def get_preprocessed_seq_data(self, raw_data, cls, conf_thresh=0.0):
         """ Preprocess data for a single sequence for a single class ready for evaluation.
         Inputs:
              - raw_data is a dict containing the data for the sequence already read in by get_raw_seq_data().
@@ -288,15 +288,15 @@ class Kitti2DBox(_BaseDataset):
             tracker_confidences = raw_data['tracker_confidences'][t][tracker_class_mask]
             similarity_scores = raw_data['similarity_scores'][t][gt_class_mask, :][:, tracker_class_mask]
 
-            # to_delete_by_confidence = tracker_confidences < 1
-            # tracker_ids = np.delete(
-            #     tracker_ids, to_delete_by_confidence, axis=0)
-            # tracker_dets = np.delete(
-            #     tracker_dets, to_delete_by_confidence, axis=0)
-            # tracker_confidences = np.delete(
-            #     tracker_confidences, to_delete_by_confidence, axis=0)
-            # similarity_scores = np.delete(
-            #     similarity_scores, to_delete_by_confidence, axis=1)
+            to_delete_by_confidence = tracker_confidences < conf_thresh
+            tracker_ids = np.delete(
+                tracker_ids, to_delete_by_confidence, axis=0)
+            tracker_dets = np.delete(
+                tracker_dets, to_delete_by_confidence, axis=0)
+            tracker_confidences = np.delete(
+                tracker_confidences, to_delete_by_confidence, axis=0)
+            similarity_scores = np.delete(
+                similarity_scores, to_delete_by_confidence, axis=1)
 
             # Match tracker and gt dets (with hungarian algorithm) and remove tracker dets which match with gt dets
             # which are labeled as truncated, occluded, or belonging to a distractor class.

@@ -62,7 +62,10 @@ class CLEAR(_BaseMetric):
                 continue
 
             # Calc score matrix to first minimise IDSWs from previous frame, and then maximise MOTP secondarily
-            similarity = data['similarity_scores'][t]
+            if 'similarity_scores_2d' in data:
+                similarity = data['similarity_scores_2d'][t]
+            else:
+                similarity = data['similarity_scores'][t]
             score_mat = (tracker_ids_t[np.newaxis, :] == prev_timestep_tracker_id[gt_ids_t[:, np.newaxis]])
             score_mat = 1000 * score_mat + similarity
             score_mat[similarity < self.threshold] = 0
