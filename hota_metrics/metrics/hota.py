@@ -16,7 +16,7 @@ class HOTA(_BaseMetric):
         self.array_labels = np.arange(0.05, 0.99, 0.05)
         self.integer_array_fields = ['HOTA_TP', 'HOTA_FN', 'HOTA_FP']
         self.float_array_fields = ['HOTA', 'DetA', 'AssA', 'DetRe', 'DetPr', 'AssRe', 'AssPr', 'LocA', 'RHOTA']
-        self.float_fields = ['HOTA(0)', 'LocA(0)', 'HOTALocA(0)']
+        self.float_fields = ['HOTA(0)', 'LocA(0)', 'HOTALocA(0)', 'MOTP3D_CLOSE', 'MOTP3D_MID', 'MOTP3D_FAR']
         self.fields = self.float_array_fields + self.integer_array_fields + self.float_fields
         self.summary_fields = self.float_array_fields + self.float_fields
 
@@ -66,7 +66,9 @@ class HOTA(_BaseMetric):
         # Calculate overall jaccard alignment score (before unique matching) between IDs
         global_alignment_score = potential_matches_count / (gt_id_count + tracker_id_count - potential_matches_count)
         matches_counts = [np.zeros_like(potential_matches_count) for _ in self.array_labels]
-
+        num_gt_close = 0
+        num_gt_mid = 0
+        num_gt_far = 0
         # Calculate scores for each timestep
         for t, (gt_ids_t, tracker_ids_t) in enumerate(zip(data['gt_ids'], data['tracker_ids'])):
             # Deal with the case that there are no gt_det/tracker_det in a timestep.
@@ -85,6 +87,40 @@ class HOTA(_BaseMetric):
 
             # Hungarian algorithm to find best matches
             match_rows, match_cols = linear_sum_assignment(-score_mat)
+
+            actually_matched_mask = similarity[match_rows, match_cols] >= 0.5
+            alpha_match_rows = match_rows[actually_matched_mask]
+            alpha_match_cols = match_cols[actually_matched_mask]
+            distance_matches = data['gt_dets'][t][alpha_match_rows, 3:6] - data['tracker_dets'][t][alpha_match_cols, 3:6]
+            distance_norms = np.linalg.norm(distance_matches, axis=1)
+
+            #gt_norm = np.linalg.norm(data['gt_dets'][t][match_rows, 3:6], axis=1)
+            gt_norm = data['gt_dets'][t][alpha_match_rows, 5]
+            close_range_mask = ((0 < gt_norm) & (gt_norm <= 20))
+            mid_range_mask = ((20 < gt_norm) & (gt_norm <= 50))
+            far_range_mask = gt_norm > 50
+
+            if np.count_nonzero(close_range_mask) > 0:
+                #print("CL", close_range_mask, distance_norms)
+                #res['MOTP3D_CLOSE'] += np.sum(distance_norms[close_range_mask]) / np.count_nonzero(close_range_mask)
+                res['MOTP3D_CLOSE'] += np.mean(distance_norms[close_range_mask])
+
+                print("CLOSE ", np.sum(distance_norms[close_range_mask]) / np.count_nonzero(close_range_mask))
+                num_gt_close += 1
+
+            if np.count_nonzero(mid_range_mask) > 0:
+                #print("MID", mid_range_mask, distance_norms)
+                res['MOTP3D_MID'] += np.sum(distance_norms[mid_range_mask]) / np.count_nonzero(mid_range_mask)
+                #res['MOTP3D_MID'] += np.median(distance_norms[mid_range_mask])
+                print("MID ", np.sum(distance_norms[mid_range_mask]) / np.count_nonzero(mid_range_mask))
+                num_gt_mid += 1
+
+            if np.count_nonzero(far_range_mask) > 0:
+                #print("FAR", far_range_mask, distance_norms)
+                res['MOTP3D_FAR'] += np.sum(distance_norms[far_range_mask]) / np.count_nonzero(far_range_mask)
+                #res['MOTP3D_FAR'] += np.median(distance_norms[far_range_mask])
+                print("FAR ", np.sum(distance_norms[far_range_mask])/ np.count_nonzero(far_range_mask))
+                num_gt_far += 1
 
             # Calculate and accumulate basic statistics
             for a, alpha in enumerate(self.array_labels):
@@ -112,6 +148,11 @@ class HOTA(_BaseMetric):
 
         # Calculate final scores
         res['LocA'] = np.maximum(1e-10, res['LocA']) / np.maximum(1e-10, res['HOTA_TP'])
+
+        res['MOTP3D_CLOSE'] = res['MOTP3D_CLOSE'] * 1.0 / np.maximum(1e-10, num_gt_close)
+        res['MOTP3D_MID'] = res['MOTP3D_MID'] * 1.0 / np.maximum(1e-10, num_gt_mid)
+        res['MOTP3D_FAR'] = res['MOTP3D_FAR'] * 1.0 / np.maximum(1e-10, num_gt_far)
+
         res = self._compute_final_fields(res)
         return res
 
@@ -122,8 +163,17 @@ class HOTA(_BaseMetric):
             res[field] = self._combine_sum(all_res, field)
         for field in ['AssRe', 'AssPr', 'AssA']:
             res[field] = self._combine_weighted_av(all_res, field, res, weight_field='HOTA_TP')
+
         loca_weighted_sum = sum([all_res[k]['LocA'] * all_res[k]['HOTA_TP'] for k in all_res.keys()])
         res['LocA'] = np.maximum(1e-10, loca_weighted_sum) / np.maximum(1e-10, res['HOTA_TP'])
+
+        res['MOTP3D_CLOSE'] = np.mean([all_res[k]['MOTP3D_CLOSE'] for k in all_res.keys()])
+
+
+        res['MOTP3D_MID'] = np.mean([all_res[k]['MOTP3D_MID'] for k in all_res.keys()])
+
+        res['MOTP3D_FAR'] = np.mean([all_res[k]['MOTP3D_FAR'] for k in all_res.keys()])
+
         res = self._compute_final_fields(res)
         return res
 
